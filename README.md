@@ -1,7 +1,18 @@
-# How to run
+# Cat Food Detector
+## ติดตั้ง
 
-``` python
-  python3 -m app
-  # or
-  python3 app
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+
+```bash
+python3 -m app
+```
+
+
+```text
+http://127.0.0.1:5000
 ```

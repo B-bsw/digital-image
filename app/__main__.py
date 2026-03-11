@@ -2,7 +2,7 @@ import base64
 import io
 
 import numpy as np
-from flask import Flask, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request
 from PIL import Image
 
 app = Flask(__name__)
@@ -19,29 +19,115 @@ HTML = """
 			.card { border: 1px solid #ddd; border-radius: 10px; padding: 20px; }
 			.ok { color: #0a7d1f; font-weight: 700; }
 			.no { color: #b00020; font-weight: 700; }
-			img { max-width: 100%; border-radius: 8px; border: 1px solid #ddd; }
+			video { width: 100%; max-width: 640px; border-radius: 8px; border: 1px solid #ddd; background: #111; }
+			button { margin-right: 8px; }
 			small { color: #666; }
 		</style>
 	</head>
 	<body>
 		<div class="card">
 			<h2>เว็บตรวจจับอาหารแมว</h2>
-			<p>อัปโหลดรูปถ้วย/จานอาหารแมว ระบบจะประเมินจากลักษณะสีและพื้นผิวของเม็ดอาหาร</p>
-			<form method="post" enctype="multipart/form-data">
-				<input type="file" name="image" accept="image/*" required />
-				<button type="submit">ตรวจจับ</button>
-			</form>
-
-			{% if result %}
-				<hr />
-				<p class="{{ 'ok' if result.detected else 'no' }}">
-					ผลลัพธ์: {{ 'พบอาหารแมว' if result.detected else 'ไม่พบอาหารแมว' }}
-				</p>
-				<p>ความมั่นใจ: {{ result.confidence }}%</p>
-				<p><small>{{ result.reason }}</small></p>
-				<img src="data:image/jpeg;base64,{{ preview }}" alt="preview" />
-			{% endif %}
+			<p>เปิดกล้องเพื่อวิเคราะห์ภาพแบบ realtime ระบบจะประเมินจากสีและพื้นผิวของภาพแต่ละเฟรม</p>
+			<video id="camera" autoplay playsinline muted></video>
+			<div style="margin-top: 10px;">
+				<button id="startBtn" type="button">เริ่มกล้อง</button>
+				<button id="stopBtn" type="button" disabled>หยุด</button>
+			</div>
+			<hr />
+			<p id="resultText">ผลลัพธ์: ยังไม่ได้เริ่ม</p>
+			<p id="confidenceText">ความมั่นใจ: -</p>
+			<p><small id="reasonText">-</small></p>
 		</div>
+
+		<script>
+			const video = document.getElementById("camera");
+			const startBtn = document.getElementById("startBtn");
+			const stopBtn = document.getElementById("stopBtn");
+			const resultText = document.getElementById("resultText");
+			const confidenceText = document.getElementById("confidenceText");
+			const reasonText = document.getElementById("reasonText");
+
+			const canvas = document.createElement("canvas");
+			let stream = null;
+			let timerId = null;
+
+			async function analyzeFrame() {
+				if (!stream || video.videoWidth === 0 || video.videoHeight === 0) {
+					return;
+				}
+
+				canvas.width = video.videoWidth;
+				canvas.height = video.videoHeight;
+				const ctx = canvas.getContext("2d");
+				ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+				const imageData = canvas.toDataURL("image/jpeg", 0.7);
+
+				try {
+					const response = await fetch("/analyze_frame", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ image: imageData }),
+					});
+
+					if (!response.ok) {
+						throw new Error("analyze failed");
+					}
+
+					const result = await response.json();
+					resultText.className = result.detected ? "ok" : "no";
+					resultText.textContent = `ผลลัพธ์: ${result.detected ? "พบอาหารแมว" : "ไม่พบอาหารแมว"}`;
+					confidenceText.textContent = `ความมั่นใจ: ${result.confidence}%`;
+					reasonText.textContent = result.reason;
+				} catch (_) {
+					resultText.className = "no";
+					resultText.textContent = "ผลลัพธ์: วิเคราะห์ไม่สำเร็จ";
+					confidenceText.textContent = "ความมั่นใจ: -";
+					reasonText.textContent = "โปรดลองใหม่อีกครั้ง";
+				}
+			}
+
+			startBtn.addEventListener("click", async () => {
+				if (stream) {
+					return;
+				}
+
+				try {
+					stream = await navigator.mediaDevices.getUserMedia({
+						video: { facingMode: "environment" },
+						audio: false,
+					});
+					video.srcObject = stream;
+					startBtn.disabled = true;
+					stopBtn.disabled = false;
+
+					timerId = window.setInterval(analyzeFrame, 500);
+					analyzeFrame();
+				} catch (_) {
+					resultText.className = "no";
+					resultText.textContent = "ผลลัพธ์: ไม่สามารถเปิดกล้องได้";
+					reasonText.textContent = "กรุณาอนุญาตการใช้งานกล้องในเบราว์เซอร์";
+				}
+			});
+
+			stopBtn.addEventListener("click", () => {
+				if (timerId) {
+					window.clearInterval(timerId);
+					timerId = null;
+				}
+				if (stream) {
+					stream.getTracks().forEach((track) => track.stop());
+					stream = null;
+					video.srcObject = null;
+				}
+				startBtn.disabled = false;
+				stopBtn.disabled = true;
+				resultText.className = "";
+				resultText.textContent = "ผลลัพธ์: หยุดการตรวจจับ";
+				confidenceText.textContent = "ความมั่นใจ: -";
+				reasonText.textContent = "-";
+			});
+		</script>
 	</body>
 </html>
 """
@@ -101,27 +187,34 @@ def detect_cat_food(image: Image.Image) -> dict:
 				"confidence": confidence,
 				"reason": f"สัดส่วนโทนสีน้ำตาล={warm_ratio:.2f}, ความหยาบพื้นผิว={texture:.2f}",
 		}
+def decode_data_url_to_image(data_url: str) -> Image.Image:
+		if "," in data_url:
+				_, encoded = data_url.split(",", 1)
+		else:
+				encoded = data_url
+		binary = base64.b64decode(encoded)
+		return Image.open(io.BytesIO(binary))
 
 
-def to_preview_base64(image: Image.Image) -> str:
-		out = io.BytesIO()
-		image.convert("RGB").save(out, format="JPEG", quality=85)
-		return base64.b64encode(out.getvalue()).decode("utf-8")
-
-
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET"])
 def index():
-		result = None
-		preview = None
+		return render_template_string(HTML)
 
-		if request.method == "POST":
-				file = request.files.get("image")
-				if file and file.filename:
-						image = Image.open(file.stream)
-						result = detect_cat_food(image)
-						preview = to_preview_base64(image.resize((480, 360)))
 
-		return render_template_string(HTML, result=result, preview=preview)
+@app.route("/analyze_frame", methods=["POST"])
+def analyze_frame():
+		payload = request.get_json(silent=True) or {}
+		image_data = payload.get("image")
+
+		if not image_data:
+				return jsonify({"error": "missing image"}), 400
+
+		try:
+				image = decode_data_url_to_image(image_data)
+		except Exception:
+				return jsonify({"error": "invalid image"}), 400
+
+		return jsonify(detect_cat_food(image))
 
 
 if __name__ == "__main__":
