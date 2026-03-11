@@ -37,6 +37,7 @@ HTML = """
 
 			<div class="mt-5 space-y-2 rounded-2xl border border-violet-100 bg-violet-50/60 p-4">
 				<p id="resultText" class="text-sm font-semibold text-violet-700 sm:text-base">ผลลัพธ์: ยังไม่ได้เริ่ม</p>
+				<p id="fillText" class="text-sm text-slate-700">ความจุภาชนะที่ถูกเติม: -</p>
 				<p id="confidenceText" class="text-sm text-slate-700">ความมั่นใจ: -</p>
 				<p id="reasonText" class="text-xs text-slate-500 sm:text-sm">-</p>
 			</div>
@@ -47,6 +48,7 @@ HTML = """
 			const startBtn = document.getElementById("startBtn");
 			const stopBtn = document.getElementById("stopBtn");
 			const resultText = document.getElementById("resultText");
+			const fillText = document.getElementById("fillText");
 			const confidenceText = document.getElementById("confidenceText");
 			const reasonText = document.getElementById("reasonText");
 
@@ -107,10 +109,12 @@ HTML = """
 
 					const result = await response.json();
 					setStatus(result.detected ? "ok" : "no", `ผลลัพธ์: ${result.detected ? "พบอาหารแมว" : "ไม่พบอาหารแมว"}`);
+					fillText.textContent = `ความจุภาชนะที่ถูกเติม: ${result.fill_percent}%`;
 					confidenceText.textContent = `ความมั่นใจ: ${result.confidence}%`;
 					reasonText.textContent = result.reason;
 				} catch (_) {
 					setStatus("no", "ผลลัพธ์: วิเคราะห์ไม่สำเร็จ");
+					fillText.textContent = "ความจุภาชนะที่ถูกเติม: -";
 					confidenceText.textContent = "ความมั่นใจ: -";
 					reasonText.textContent = "โปรดลองใหม่อีกครั้ง";
 				}
@@ -149,6 +153,7 @@ HTML = """
 				}
 				setButtonsRunning(false);
 				setStatus("idle", "ผลลัพธ์: หยุดการตรวจจับ");
+				fillText.textContent = "ความจุภาชนะที่ถูกเติม: -";
 				confidenceText.textContent = "ความมั่นใจ: -";
 				reasonText.textContent = "-";
 			});
@@ -194,23 +199,49 @@ def detect_cat_food(image: Image.Image) -> dict:
 		s = hsv[..., 1]
 		v = hsv[..., 2]
 
-		warm_brown = (h >= 12) & (h <= 45) & (s >= 0.25) & (v >= 0.12) & (v <= 0.82)
-		warm_ratio = float(np.mean(warm_brown))
+		height, width = h.shape
+		yy, xx = np.indices((height, width))
+		nx = (xx - (width / 2.0)) / (width / 2.0)
+		ny = (yy - (height / 2.0)) / (height / 2.0)
+		center_ellipse = (nx * nx + ny * ny) <= 0.92
 
 		gray = np.mean(arr.astype(np.float32), axis=2)
 		dx = np.abs(np.diff(gray, axis=1))
 		dy = np.abs(np.diff(gray, axis=0))
 		texture = float((dx.mean() + dy.mean()) / 2.0)
-		texture_norm = min(texture / 35.0, 1.0)
+		texture_norm = float(min(texture / 34.0, 1.0))
 
-		score = 0.65 * min(warm_ratio / 0.16, 1.0) + 0.35 * texture_norm
+		food_warm = (h >= 12) & (h <= 55) & (s >= 0.18) & (v >= 0.10) & (v <= 0.88)
+		food_dark = (h >= 5) & (h <= 42) & (s >= 0.12) & (v >= 0.05) & (v <= 0.62)
+		food_mask = food_warm | food_dark
+
+		food_ratio = float(np.mean(food_mask))
+		brightness = float(v.mean())
+
+		plate_like = (s <= 0.55) & (v >= np.percentile(v, 35))
+		container_mask = center_ellipse & plate_like
+		container_pixels = int(container_mask.sum())
+		min_container_pixels = int(height * width * 0.08)
+		if container_pixels < min_container_pixels:
+				container_mask = center_ellipse
+				container_pixels = int(container_mask.sum())
+
+		raw_fill_ratio = float(np.sum(food_mask & container_mask) / max(container_pixels, 1))
+		fill_ratio = min(raw_fill_ratio / 0.70, 1.0)
+		score = 0.70 * min(food_ratio / 0.12, 1.0) + 0.30 * min(raw_fill_ratio / 0.18, 1.0)
+
 		confidence = int(max(0.0, min(score, 1.0)) * 100)
-		detected = confidence >= 52
+		fill_percent = int(max(0.0, min(fill_ratio, 1.0)) * 100)
+		detected = fill_percent >= 3
 
 		return {
 				"detected": detected,
 				"confidence": confidence,
-				"reason": f"สัดส่วนโทนสีน้ำตาล={warm_ratio:.2f}, ความหยาบพื้นผิว={texture:.2f}",
+				"fill_percent": fill_percent,
+				"reason": (
+						f"food_ratio={food_ratio:.2f}, "
+						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.2f}, brightness={brightness:.2f}"
+				),
 		}
 def decode_data_url_to_image(data_url: str) -> Image.Image:
 		if "," in data_url:
@@ -243,4 +274,4 @@ def analyze_frame():
 
 
 if __name__ == "__main__":
-		app.run(host="127.0.0.1", port=5000, debug=True)
+		app.run(host="127.0.0.1", port=3000, debug=True)
