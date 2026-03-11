@@ -1,5 +1,6 @@
 import base64
 import io
+from functools import lru_cache
 
 import numpy as np
 from flask import Flask, jsonify, render_template_string, request
@@ -19,27 +20,29 @@ HTML = """
 		<link href="https://fonts.googleapis.com/css2?family=Mali:wght@400;500;600;700&display=swap" rel="stylesheet">
 		<script src="https://cdn.tailwindcss.com"></script>
 	</head>
-	<body class="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-violet-100 p-5 sm:p-8 text-slate-700" style="font-family: 'Mali', cursive;">
-		<div class="mx-auto w-full max-w-3xl rounded-3xl border border-rose-100 bg-white/90 p-5 shadow-xl shadow-rose-100/60 backdrop-blur sm:p-8">
+	<body class="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-violet-100 px-3 py-4 text-slate-700 sm:p-8" style="font-family: 'Mali', cursive;">
+		<div class="mx-auto w-full max-w-3xl rounded-2xl border border-rose-100 bg-white/90 p-4 shadow-xl shadow-rose-100/60 backdrop-blur sm:rounded-3xl sm:p-8">
 			<div class="mb-5 border-b border-rose-100 pb-4">
 				<h2 class="text-2xl font-bold text-rose-700 sm:text-3xl">เว็บตรวจจับอาหารแมว</h2>
 				<p class="mt-2 text-sm text-slate-600 sm:text-base">เปิดกล้องเพื่อวิเคราะห์ภาพแบบเรียลไทม์ ระบบจะประเมินจากสีและพื้นผิวของภาพแต่ละเฟรม</p>
 			</div>
 
-			<div class="rounded-2xl border border-rose-100 bg-rose-50/60 p-3">
-				<video id="camera" autoplay playsinline muted class="aspect-video w-full rounded-xl border border-rose-200 bg-slate-900"></video>
+			<div class="rounded-2xl border border-rose-100 bg-rose-50/60 p-2 sm:p-3">
+				<video id="camera" autoplay playsinline muted class="aspect-video w-full rounded-lg border border-rose-200 bg-slate-900 sm:rounded-xl"></video>
 			</div>
 
-			<div class="mt-4 flex flex-wrap gap-2">
-				<button id="startBtn" type="button" class="rounded-xl bg-rose-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-600 focus:outline-none focus:ring-2 focus:ring-rose-300">เริ่มกล้อง</button>
-				<button id="stopBtn" type="button" disabled class="rounded-xl bg-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 transition disabled:cursor-not-allowed">หยุด</button>
+			<div class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+				<button id="startBtn" type="button" class="w-full rounded-xl bg-rose-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-600 focus:outline-none focus:ring-2 focus:ring-rose-300 disabled:cursor-not-allowed">เริ่มกล้อง</button>
+				<button id="stopBtn" type="button" disabled class="w-full rounded-xl bg-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-600 transition disabled:cursor-not-allowed">หยุด</button>
+				<input id="uploadInput" type="file" accept="image/*" class="hidden" />
+				<button id="uploadBtn" type="button" class="w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-300">ทดสอบจากรูป</button>
 			</div>
 
 			<div class="mt-5 space-y-2 rounded-2xl border border-violet-100 bg-violet-50/60 p-4">
 				<p id="resultText" class="text-sm font-semibold text-violet-700 sm:text-base">ผลลัพธ์: ยังไม่ได้เริ่ม</p>
 				<p id="fillText" class="text-sm text-slate-700">ความจุภาชนะที่ถูกเติม: -</p>
 				<p id="confidenceText" class="text-sm text-slate-700">ความมั่นใจ: -</p>
-				<p id="reasonText" class="text-xs text-slate-500 sm:text-sm">-</p>
+				<p id="reasonText" class="break-words text-xs text-slate-500 sm:text-sm">-</p>
 			</div>
 		</div>
 
@@ -47,6 +50,8 @@ HTML = """
 			const video = document.getElementById("camera");
 			const startBtn = document.getElementById("startBtn");
 			const stopBtn = document.getElementById("stopBtn");
+			const uploadBtn = document.getElementById("uploadBtn");
+			const uploadInput = document.getElementById("uploadInput");
 			const resultText = document.getElementById("resultText");
 			const fillText = document.getElementById("fillText");
 			const confidenceText = document.getElementById("confidenceText");
@@ -60,6 +65,10 @@ HTML = """
 			const statusOkClass = "text-emerald-600";
 			const statusNoClass = "text-rose-600";
 			const statusIdleClass = "text-violet-700";
+			const startBtnEnabledClass = "w-full rounded-xl bg-rose-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-600 focus:outline-none focus:ring-2 focus:ring-rose-300 disabled:cursor-not-allowed";
+			const startBtnDisabledClass = "w-full rounded-xl bg-rose-300 px-4 py-2.5 text-sm font-semibold text-white transition disabled:cursor-not-allowed";
+			const stopBtnEnabledClass = "w-full rounded-xl bg-violet-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-600";
+			const stopBtnDisabledClass = "w-full rounded-xl bg-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-600 transition disabled:cursor-not-allowed";
 
 			function setStatus(kind, message) {
 				resultText.className = statusBaseClass;
@@ -76,12 +85,37 @@ HTML = """
 			function setButtonsRunning(isRunning) {
 				startBtn.disabled = isRunning;
 				stopBtn.disabled = !isRunning;
-				startBtn.className = isRunning
-					? "rounded-xl bg-rose-300 px-4 py-2 text-sm font-semibold text-white transition disabled:cursor-not-allowed"
-					: "rounded-xl bg-rose-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-600 focus:outline-none focus:ring-2 focus:ring-rose-300";
-				stopBtn.className = isRunning
-					? "rounded-xl bg-violet-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600"
-					: "rounded-xl bg-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 transition disabled:cursor-not-allowed";
+				startBtn.className = isRunning ? startBtnDisabledClass : startBtnEnabledClass;
+				stopBtn.className = isRunning ? stopBtnEnabledClass : stopBtnDisabledClass;
+			}
+
+			function renderResult(result) {
+				setStatus(result.detected ? "ok" : "no", `ผลลัพธ์: ${result.detected ? "พบอาหารแมว" : "ไม่พบอาหารแมว"}`);
+				fillText.textContent = `ความจุภาชนะที่ถูกเติม: ${result.fill_percent}%`;
+				confidenceText.textContent = `ความมั่นใจ: ${result.confidence}%`;
+				reasonText.textContent = result.reason;
+			}
+
+			async function analyzeImageData(imageData) {
+				try {
+					const response = await fetch("/analyze_frame", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ image: imageData }),
+					});
+
+					if (!response.ok) {
+						throw new Error("analyze failed");
+					}
+
+					const result = await response.json();
+					renderResult(result);
+				} catch (_) {
+					setStatus("no", "ผลลัพธ์: วิเคราะห์ไม่สำเร็จ");
+					fillText.textContent = "ความจุภาชนะที่ถูกเติม: -";
+					confidenceText.textContent = "ความมั่นใจ: -";
+					reasonText.textContent = "โปรดลองใหม่อีกครั้ง";
+				}
 			}
 
 			async function analyzeFrame() {
@@ -95,29 +129,7 @@ HTML = """
 				ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
 				const imageData = canvas.toDataURL("image/jpeg", 0.7);
-
-				try {
-					const response = await fetch("/analyze_frame", {
-						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ image: imageData }),
-					});
-
-					if (!response.ok) {
-						throw new Error("analyze failed");
-					}
-
-					const result = await response.json();
-					setStatus(result.detected ? "ok" : "no", `ผลลัพธ์: ${result.detected ? "พบอาหารแมว" : "ไม่พบอาหารแมว"}`);
-					fillText.textContent = `ความจุภาชนะที่ถูกเติม: ${result.fill_percent}%`;
-					confidenceText.textContent = `ความมั่นใจ: ${result.confidence}%`;
-					reasonText.textContent = result.reason;
-				} catch (_) {
-					setStatus("no", "ผลลัพธ์: วิเคราะห์ไม่สำเร็จ");
-					fillText.textContent = "ความจุภาชนะที่ถูกเติม: -";
-					confidenceText.textContent = "ความมั่นใจ: -";
-					reasonText.textContent = "โปรดลองใหม่อีกครั้ง";
-				}
+				await analyzeImageData(imageData);
 			}
 
 			startBtn.addEventListener("click", async () => {
@@ -157,6 +169,35 @@ HTML = """
 				confidenceText.textContent = "ความมั่นใจ: -";
 				reasonText.textContent = "-";
 			});
+
+			uploadBtn.addEventListener("click", () => {
+				uploadInput.click();
+			});
+
+			uploadInput.addEventListener("change", async (event) => {
+				const [file] = event.target.files || [];
+				if (!file) {
+					return;
+				}
+
+				const reader = new FileReader();
+				reader.onload = async () => {
+					const dataUrl = typeof reader.result === "string" ? reader.result : "";
+					if (!dataUrl) {
+						setStatus("no", "ผลลัพธ์: อ่านรูปไม่สำเร็จ");
+						reasonText.textContent = "กรุณาลองเลือกรูปใหม่";
+						return;
+					}
+					setStatus("idle", "ผลลัพธ์: กำลังวิเคราะห์จากรูป");
+					await analyzeImageData(dataUrl);
+				};
+				reader.onerror = () => {
+					setStatus("no", "ผลลัพธ์: อ่านรูปไม่สำเร็จ");
+					reasonText.textContent = "ไฟล์รูปอาจเสียหาย";
+				};
+				reader.readAsDataURL(file);
+				event.target.value = "";
+			});
 		</script>
 	</body>
 </html>
@@ -190,6 +231,54 @@ def rgb_to_hsv(rgb: np.ndarray) -> np.ndarray:
 		return np.stack([hue, sat, val], axis=-1)
 
 
+@lru_cache(maxsize=1)
+def get_yolo_model():
+		try:
+				from ultralytics import YOLO
+		except ImportError as exc:
+				return None, f"ultralytics import failed: {exc}"
+
+		try:
+				return YOLO("yolov8n.pt"), None
+		except Exception as exc:
+				return None, f"yolo model load failed: {exc}"
+
+
+def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str]:
+		height, width = arr.shape[:2]
+		model, load_error = get_yolo_model()
+		if model is None:
+				return np.zeros((height, width), dtype=bool), load_error or "yolo unavailable"
+
+		try:
+				result = model.predict(arr, imgsz=320, conf=0.25, verbose=False)[0]
+		except Exception as exc:
+				return np.zeros((height, width), dtype=bool), f"yolo inference failed: {exc}"
+
+		if result.boxes is None or len(result.boxes) == 0:
+				return np.zeros((height, width), dtype=bool), "yolo bowl not found"
+
+		classes = result.boxes.cls.detach().cpu().numpy().astype(int)
+		confidences = result.boxes.conf.detach().cpu().numpy()
+		xyxy = result.boxes.xyxy.detach().cpu().numpy()
+		bowl_indices = np.where(classes == 45)[0]
+		if bowl_indices.size == 0:
+				return np.zeros((height, width), dtype=bool), "yolo bowl class not found"
+
+		best_idx = bowl_indices[np.argmax(confidences[bowl_indices])]
+		x1, y1, x2, y2 = xyxy[best_idx]
+		pad_x = int((x2 - x1) * 0.05)
+		pad_y = int((y2 - y1) * 0.05)
+		left = max(0, int(x1) - pad_x)
+		top = max(0, int(y1) - pad_y)
+		right = min(width, int(x2) + pad_x)
+		bottom = min(height, int(y2) + pad_y)
+
+		mask = np.zeros((height, width), dtype=bool)
+		mask[top:bottom, left:right] = True
+		return mask, "yolo bowl found"
+
+
 def detect_cat_food(image: Image.Image) -> dict:
 		image = image.convert("RGB").resize((320, 320))
 		arr = np.array(image)
@@ -218,13 +307,20 @@ def detect_cat_food(image: Image.Image) -> dict:
 		food_ratio = float(np.mean(food_mask))
 		brightness = float(v.mean())
 
-		plate_like = (s <= 0.55) & (v >= np.percentile(v, 35))
-		container_mask = center_ellipse & plate_like
+		yolo_mask, yolo_reason = detect_bowl_mask(arr)
+		container_mask = yolo_mask
 		container_pixels = int(container_mask.sum())
-		min_container_pixels = int(height * width * 0.08)
-		if container_pixels < min_container_pixels:
-				container_mask = center_ellipse
+		if container_pixels == 0:
+				plate_like = (s <= 0.55) & (v >= np.percentile(v, 35))
+				container_mask = center_ellipse & plate_like
 				container_pixels = int(container_mask.sum())
+				min_container_pixels = int(height * width * 0.08)
+				if container_pixels < min_container_pixels:
+						container_mask = center_ellipse
+						container_pixels = int(container_mask.sum())
+				container_source = "fallback-center"
+		else:
+				container_source = "yolo"
 
 		raw_fill_ratio = float(np.sum(food_mask & container_mask) / max(container_pixels, 1))
 		fill_ratio = min(raw_fill_ratio / 0.70, 1.0)
@@ -240,9 +336,12 @@ def detect_cat_food(image: Image.Image) -> dict:
 				"fill_percent": fill_percent,
 				"reason": (
 						f"food_ratio={food_ratio:.2f}, "
-						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.2f}, brightness={brightness:.2f}"
+						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.2f}, "
+						f"brightness={brightness:.2f}, container={container_source}, yolo={yolo_reason}"
 				),
 		}
+
+
 def decode_data_url_to_image(data_url: str) -> Image.Image:
 		if "," in data_url:
 				_, encoded = data_url.split(",", 1)
