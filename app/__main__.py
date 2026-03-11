@@ -261,14 +261,33 @@ def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str]:
 		classes = result.boxes.cls.detach().cpu().numpy().astype(int)
 		confidences = result.boxes.conf.detach().cpu().numpy()
 		xyxy = result.boxes.xyxy.detach().cpu().numpy()
-		bowl_indices = np.where(classes == 45)[0]
-		if bowl_indices.size == 0:
-				return np.zeros((height, width), dtype=bool), "yolo bowl class not found"
 
-		best_idx = bowl_indices[np.argmax(confidences[bowl_indices])]
+		priority_classes = [45, 41, 39]
+		selected_indices = np.array([], dtype=int)
+		for class_id in priority_classes:
+				indices = np.where(classes == class_id)[0]
+				if indices.size > 0:
+						selected_indices = indices
+						break
+
+		reason = "yolo container-like class found"
+		if selected_indices.size == 0:
+				img_area = float(height * width)
+				box_areas = (xyxy[:, 2] - xyxy[:, 0]) * (xyxy[:, 3] - xyxy[:, 1])
+				valid = np.where(
+						(confidences >= 0.35)
+						& (box_areas >= 0.02 * img_area)
+						& (box_areas <= 0.90 * img_area)
+				)[0]
+				if valid.size == 0:
+						return np.zeros((height, width), dtype=bool), "yolo no suitable container box"
+				selected_indices = valid
+				reason = "yolo fallback generic box"
+
+		best_idx = selected_indices[np.argmax(confidences[selected_indices])]
 		x1, y1, x2, y2 = xyxy[best_idx]
-		pad_x = int((x2 - x1) * 0.05)
-		pad_y = int((y2 - y1) * 0.05)
+		pad_x = int((x2 - x1) * 0.10)
+		pad_y = int((y2 - y1) * 0.10)
 		left = max(0, int(x1) - pad_x)
 		top = max(0, int(y1) - pad_y)
 		right = min(width, int(x2) + pad_x)
@@ -276,7 +295,7 @@ def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str]:
 
 		mask = np.zeros((height, width), dtype=bool)
 		mask[top:bottom, left:right] = True
-		return mask, "yolo bowl found"
+		return mask, reason
 
 
 def detect_cat_food(image: Image.Image) -> dict:
@@ -298,13 +317,9 @@ def detect_cat_food(image: Image.Image) -> dict:
 		dx = np.abs(np.diff(gray, axis=1))
 		dy = np.abs(np.diff(gray, axis=0))
 		texture = float((dx.mean() + dy.mean()) / 2.0)
-		texture_norm = float(min(texture / 34.0, 1.0))
+		gx, gy = np.gradient(gray)
+		grad_mag = np.hypot(gx, gy)
 
-		food_warm = (h >= 12) & (h <= 55) & (s >= 0.18) & (v >= 0.10) & (v <= 0.88)
-		food_dark = (h >= 5) & (h <= 42) & (s >= 0.12) & (v >= 0.05) & (v <= 0.62)
-		food_mask = food_warm | food_dark
-
-		food_ratio = float(np.mean(food_mask))
 		brightness = float(v.mean())
 
 		yolo_mask, yolo_reason = detect_bowl_mask(arr)
@@ -322,13 +337,21 @@ def detect_cat_food(image: Image.Image) -> dict:
 		else:
 				container_source = "yolo"
 
+		grad_threshold = float(np.percentile(grad_mag[container_mask], 72))
+		texture_mask = grad_mag >= grad_threshold
+		food_warm = (h >= 8) & (h <= 75) & (s >= 0.08) & (v >= 0.08) & (v <= 0.95)
+		food_dark = (v >= 0.10) & (v <= 0.78) & (s >= 0.04)
+		texture_food = texture_mask & (v >= 0.07)
+		food_mask = (food_warm | food_dark | texture_food) & container_mask
+		food_ratio = float(np.sum(food_mask) / max(container_pixels, 1))
+
 		raw_fill_ratio = float(np.sum(food_mask & container_mask) / max(container_pixels, 1))
-		fill_ratio = min(raw_fill_ratio / 0.70, 1.0)
-		score = 0.70 * min(food_ratio / 0.12, 1.0) + 0.30 * min(raw_fill_ratio / 0.18, 1.0)
+		fill_ratio = min(raw_fill_ratio / 0.60, 1.0)
+		score = 0.60 * min(food_ratio / 0.06, 1.0) + 0.40 * min(raw_fill_ratio / 0.12, 1.0)
 
 		confidence = int(max(0.0, min(score, 1.0)) * 100)
 		fill_percent = int(max(0.0, min(fill_ratio, 1.0)) * 100)
-		detected = fill_percent >= 3
+		detected = fill_percent >= 1
 
 		return {
 				"detected": detected,
