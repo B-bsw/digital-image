@@ -84,33 +84,37 @@ HTML = """
 			let stream = null;
 			let timerId = null;
 
-			function drawCircle(ctx, canvasEl, box, label, color) {
+			function drawKibbleCircles(ctx, canvasEl, boxes, color) {
 				const dw = canvasEl.offsetWidth;
 				const dh = canvasEl.offsetHeight;
 				canvasEl.width = dw;
 				canvasEl.height = dh;
 				ctx.clearRect(0, 0, dw, dh);
-				if (!box) return;
-				const x = box.x1 * dw;
-				const y = box.y1 * dh;
-				const w = (box.x2 - box.x1) * dw;
-				const h = (box.y2 - box.y1) * dh;
-				const cx = x + w / 2;
-				const cy = y + h / 2;
-				const radius = Math.max(8, Math.min(w, h) / 2);
+				if (!boxes || boxes.length === 0) return;
 				ctx.strokeStyle = color;
-				ctx.lineWidth = 3;
+				ctx.lineWidth = 2;
 				ctx.lineJoin = "round";
-				ctx.beginPath();
-				ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-				ctx.stroke();
+				for (const box of boxes) {
+					const x = box.x1 * dw;
+					const y = box.y1 * dh;
+					const w = (box.x2 - box.x1) * dw;
+					const h = (box.y2 - box.y1) * dh;
+					const cx = x + w / 2;
+					const cy = y + h / 2;
+					const radius = Math.max(2, Math.min(w, h) / 2);
+					ctx.beginPath();
+					ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+					ctx.stroke();
+				}
+
 				const fontSize = Math.max(12, Math.round(dh * 0.045));
+				const label = `เม็ดอาหาร ${boxes.length} เม็ด`;
 				ctx.font = `bold ${fontSize}px Mali, sans-serif`;
 				const textW = ctx.measureText(label).width;
 				const padX = 6, padY = 4;
 				const labelH = fontSize + padY * 2;
-				const labelY = (cy - radius) > labelH + 2 ? (cy - radius) - labelH : (cy + radius) + 2;
-				const labelX = Math.max(0, Math.min(dw - (textW + padX * 2), cx - (textW + padX * 2) / 2));
+				const labelX = 8;
+				const labelY = 8;
 				ctx.fillStyle = color;
 				ctx.beginPath();
 				ctx.roundRect(labelX, labelY, textW + padX * 2, labelH, 4);
@@ -150,13 +154,12 @@ HTML = """
 			function renderResult(result, isUpload) {
 				const pct = result.fill_percent ?? 0;
 				const status = result.status ?? (result.detected ? "ok" : "empty");
-				const box = result.bowl_box ?? null;
+				const kibbleBoxes = result.kibble_boxes ?? [];
 				const boxColor = status === "empty" ? "#f43f5e" : status === "low" ? "#f59e0b" : "#10b981";
-				const boxLabel = box ? (status === "empty" ? "ถาดอาหาร (หมดแล้ว)" : `ถาดอาหาร ${pct}%`) : "";
 				if (isUpload) {
-					drawCircle(previewCtx, previewOverlay, box, boxLabel, boxColor);
+					drawKibbleCircles(previewCtx, previewOverlay, kibbleBoxes, boxColor);
 				} else {
-					drawCircle(overlayCtx, overlay, box, boxLabel, boxColor);
+					drawKibbleCircles(overlayCtx, overlay, kibbleBoxes, boxColor);
 				}
 
 				let statusKind, statusMsg;
@@ -438,6 +441,73 @@ def _texture_metrics(gray: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarr
 		return grad_mag, lap, local_std
 
 
+def _extract_kibble_components(mask: np.ndarray) -> tuple[list[dict], np.ndarray]:
+		height, width = mask.shape
+		visited = np.zeros((height, width), dtype=bool)
+		kept_mask = np.zeros((height, width), dtype=bool)
+		boxes: list[dict] = []
+
+		for y in range(height):
+				for x in range(width):
+						if not mask[y, x] or visited[y, x]:
+								continue
+
+						stack = [(y, x)]
+						visited[y, x] = True
+						pixels: list[tuple[int, int]] = []
+						min_x = x
+						max_x = x
+						min_y = y
+						max_y = y
+
+						while stack:
+								cy, cx = stack.pop()
+								pixels.append((cy, cx))
+								if cx < min_x:
+										min_x = cx
+								if cx > max_x:
+										max_x = cx
+								if cy < min_y:
+										min_y = cy
+								if cy > max_y:
+										max_y = cy
+
+								for ny in range(max(0, cy - 1), min(height, cy + 2)):
+										for nx in range(max(0, cx - 1), min(width, cx + 2)):
+												if mask[ny, nx] and not visited[ny, nx]:
+														visited[ny, nx] = True
+														stack.append((ny, nx))
+
+						area = len(pixels)
+						box_w = (max_x - min_x + 1)
+						box_h = (max_y - min_y + 1)
+						aspect = max(box_w / max(box_h, 1), box_h / max(box_w, 1))
+						fill = area / max(box_w * box_h, 1)
+
+						is_kibble = (
+								area >= 5
+								and area <= 180
+								and aspect <= 2.8
+								and fill >= 0.22
+						)
+						if not is_kibble:
+								continue
+
+						for py, px in pixels:
+								kept_mask[py, px] = True
+
+						boxes.append(
+								{
+										"x1": min_x / width,
+										"y1": min_y / height,
+										"x2": (max_x + 1) / width,
+										"y2": (max_y + 1) / height,
+								}
+						)
+
+		return boxes, kept_mask
+
+
 @lru_cache(maxsize=1)
 def get_reference_kibble_signature() -> tuple[dict | None, str]:
 		reference_path = Path(__file__).resolve().parent.parent / "shopping.webp"
@@ -548,8 +618,10 @@ def detect_cat_food(image: Image.Image) -> dict:
 		)
 		kibble_like = kibble_like & (neighbor_count >= 3)
 
-		food_mask = kibble_like & container_mask
+		raw_kibble_mask = kibble_like & container_mask
+		kibble_boxes, food_mask = _extract_kibble_components(raw_kibble_mask)
 		kibble_ratio = float(np.sum(food_mask) / max(container_pixels, 1))
+		kibble_count = len(kibble_boxes)
 
 		edge_density = float(np.mean(in_container_grad))
 		lap_density = float(np.mean(in_container_lap))
@@ -565,6 +637,8 @@ def detect_cat_food(image: Image.Image) -> dict:
 		if ref_signature is not None and ref_similarity < 0.28 and kibble_ratio < 0.03:
 				strict_reject = True
 		if kibble_ratio < 0.006:
+				strict_reject = True
+		if kibble_count == 0:
 				strict_reject = True
 
 		raw_fill_ratio = kibble_ratio
@@ -595,9 +669,10 @@ def detect_cat_food(image: Image.Image) -> dict:
 				"status": status,
 				"confidence": confidence,
 				"fill_percent": fill_percent,
+				"kibble_boxes": kibble_boxes,
 				"bowl_box": bowl_box,
 				"reason": (
-						f"kibble_ratio={kibble_ratio:.2f}, "
+						f"kibble_ratio={kibble_ratio:.2f}, count={kibble_count}, "
 						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.3f}, "
 						f"edge={edge_density:.3f}, lap={lap_density:.3f}, local_std={texture_density:.3f}, "
 						f"ref_similarity={ref_similarity:.2f}, ref={ref_status}, "
