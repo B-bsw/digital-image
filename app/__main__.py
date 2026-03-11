@@ -1,6 +1,7 @@
 import base64
 import io
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 from flask import Flask, jsonify, render_template_string, request
@@ -28,13 +29,13 @@ HTML = """
 			</div>
 
 			<div class="rounded-2xl border border-rose-100 bg-rose-50/60 p-2 sm:p-3">
-				<div class="relative">
-					<video id="camera" autoplay playsinline muted class="aspect-video w-full rounded-lg border border-rose-200 bg-slate-900 sm:rounded-xl"></video>
-					<canvas id="overlay" class="pointer-events-none absolute inset-0 h-full w-full rounded-lg sm:rounded-xl"></canvas>
+				<div class="relative aspect-video overflow-hidden rounded-lg border border-rose-200 bg-slate-900 sm:rounded-xl">
+					<video id="camera" autoplay playsinline muted class="absolute inset-0 h-full w-full object-cover"></video>
+					<canvas id="overlay" class="pointer-events-none absolute inset-0 h-full w-full"></canvas>
 				</div>
-				<div id="uploadPreview" class="relative mt-2 hidden">
-					<img id="previewImg" class="w-full rounded-lg sm:rounded-xl" alt="preview" />
-					<canvas id="previewOverlay" class="pointer-events-none absolute inset-0 h-full w-full rounded-lg sm:rounded-xl"></canvas>
+				<div id="uploadPreview" class="relative mt-2 hidden aspect-video overflow-hidden rounded-lg border border-rose-200 bg-slate-900 sm:rounded-xl">
+					<img id="previewImg" class="absolute inset-0 h-full w-full object-cover" alt="preview" />
+					<canvas id="previewOverlay" class="pointer-events-none absolute inset-0 h-full w-full"></canvas>
 				</div>
 			</div>
 
@@ -399,20 +400,7 @@ def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str, dict | None]:
 		return mask, reason, box_norm
 
 
-def detect_cat_food(image: Image.Image) -> dict:
-		image = image.convert("RGB").resize((320, 320))
-		arr = np.array(image)
-
-		height, width = arr.shape[:2]
-		yy, xx = np.indices((height, width))
-		nx = (xx - (width / 2.0)) / (width / 2.0)
-		ny = (yy - (height / 2.0)) / (height / 2.0)
-		center_ellipse = (nx * nx + ny * ny) <= 0.92
-
-		gray = np.mean(arr.astype(np.float32), axis=2) / 255.0
-		dx = np.abs(np.diff(gray, axis=1))
-		dy = np.abs(np.diff(gray, axis=0))
-		texture = float((dx.mean() + dy.mean()) / 2.0)
+def _texture_metrics(gray: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 		gx, gy = np.gradient(gray)
 		grad_mag = np.hypot(gx, gy)
 		lap = np.abs(
@@ -447,6 +435,57 @@ def detect_cat_food(image: Image.Image) -> dict:
 				+ np.roll(np.roll(gray_sq, -1, axis=0), -1, axis=1)
 		) / 9.0
 		local_std = np.sqrt(np.maximum(local_sq_mean - (local_mean * local_mean), 0.0))
+		return grad_mag, lap, local_std
+
+
+@lru_cache(maxsize=1)
+def get_reference_kibble_signature() -> tuple[dict | None, str]:
+		reference_path = Path(__file__).resolve().parent.parent / "shopping.webp"
+		if not reference_path.exists():
+				return None, "reference image not found"
+
+		try:
+				ref_img = Image.open(reference_path).convert("RGB").resize((320, 320))
+		except Exception as exc:
+				return None, f"reference load failed: {exc}"
+
+		ref_arr = np.array(ref_img)
+		height, width = ref_arr.shape[:2]
+		yy, xx = np.indices((height, width))
+		nx = (xx - (width / 2.0)) / (width / 2.0)
+		ny = (yy - (height / 2.0)) / (height / 2.0)
+		center_mask = (nx * nx + ny * ny) <= 0.92
+
+		gray = np.mean(ref_arr.astype(np.float32), axis=2) / 255.0
+		grad_mag, lap, local_std = _texture_metrics(gray)
+
+		edge_mean = float(np.mean(grad_mag[center_mask]))
+		lap_mean = float(np.mean(lap[center_mask]))
+		std_mean = float(np.mean(local_std[center_mask]))
+
+		signature = {
+				"edge_mean": edge_mean,
+				"lap_mean": lap_mean,
+				"std_mean": std_mean,
+		}
+		return signature, "reference loaded"
+
+
+def detect_cat_food(image: Image.Image) -> dict:
+		image = image.convert("RGB").resize((320, 320))
+		arr = np.array(image)
+
+		height, width = arr.shape[:2]
+		yy, xx = np.indices((height, width))
+		nx = (xx - (width / 2.0)) / (width / 2.0)
+		ny = (yy - (height / 2.0)) / (height / 2.0)
+		center_ellipse = (nx * nx + ny * ny) <= 0.92
+
+		gray = np.mean(arr.astype(np.float32), axis=2) / 255.0
+		dx = np.abs(np.diff(gray, axis=1))
+		dy = np.abs(np.diff(gray, axis=0))
+		texture = float((dx.mean() + dy.mean()) / 2.0)
+		grad_mag, lap, local_std = _texture_metrics(gray)
 
 		brightness = float(gray.mean())
 
@@ -473,25 +512,49 @@ def detect_cat_food(image: Image.Image) -> dict:
 		lap_threshold = float(np.percentile(in_container_lap, 72))
 		std_threshold = float(np.percentile(in_container_std, 68))
 
-		kibble_like = (
+		base_kibble_like = (
 				(grad_mag >= grad_threshold)
 				& (lap >= lap_threshold)
 				& (local_std >= std_threshold)
 				& (gray >= 0.10)
 				& (gray <= 0.95)
 		)
+
+		ref_signature, ref_status = get_reference_kibble_signature()
+		ref_similarity = 0.0
+		if ref_signature is not None:
+				edge_scale = max(ref_signature["edge_mean"] * 0.8, 0.02)
+				lap_scale = max(ref_signature["lap_mean"] * 0.8, 0.03)
+				std_scale = max(ref_signature["std_mean"] * 0.8, 0.02)
+
+				edge_like = np.abs(grad_mag - ref_signature["edge_mean"]) <= edge_scale
+				lap_like = np.abs(lap - ref_signature["lap_mean"]) <= lap_scale
+				std_like = np.abs(local_std - ref_signature["std_mean"]) <= std_scale
+				reference_kibble_like = edge_like & lap_like & std_like & (gray >= 0.10) & (gray <= 0.95)
+				kibble_like = base_kibble_like | reference_kibble_like
+		else:
+				kibble_like = base_kibble_like
+
 		food_mask = kibble_like & container_mask
 		kibble_ratio = float(np.sum(food_mask) / max(container_pixels, 1))
 
 		edge_density = float(np.mean(in_container_grad))
+		lap_density = float(np.mean(in_container_lap))
 		texture_density = float(np.mean(in_container_std))
 
+		if ref_signature is not None:
+				edge_match = max(0.0, 1.0 - abs(edge_density - ref_signature["edge_mean"]) / max(ref_signature["edge_mean"], 1e-6))
+				lap_match = max(0.0, 1.0 - abs(lap_density - ref_signature["lap_mean"]) / max(ref_signature["lap_mean"], 1e-6))
+				std_match = max(0.0, 1.0 - abs(texture_density - ref_signature["std_mean"]) / max(ref_signature["std_mean"], 1e-6))
+				ref_similarity = (edge_match + lap_match + std_match) / 3.0
+
 		raw_fill_ratio = kibble_ratio
-		fill_ratio = min(raw_fill_ratio / 0.22, 1.0)
+		fill_ratio = min(raw_fill_ratio / 0.24, 1.0)
 		score = (
-				0.55 * min(kibble_ratio / 0.16, 1.0)
-				+ 0.25 * min(edge_density / 0.09, 1.0)
-				+ 0.20 * min(texture_density / 0.07, 1.0)
+				0.45 * min(kibble_ratio / 0.16, 1.0)
+				+ 0.20 * min(edge_density / 0.09, 1.0)
+				+ 0.15 * min(texture_density / 0.07, 1.0)
+				+ 0.20 * ref_similarity
 		)
 
 		confidence = int(max(0.0, min(score, 1.0)) * 100)
@@ -514,7 +577,8 @@ def detect_cat_food(image: Image.Image) -> dict:
 				"reason": (
 						f"kibble_ratio={kibble_ratio:.2f}, "
 						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.3f}, "
-						f"edge={edge_density:.3f}, local_std={texture_density:.3f}, "
+						f"edge={edge_density:.3f}, lap={lap_density:.3f}, local_std={texture_density:.3f}, "
+						f"ref_similarity={ref_similarity:.2f}, ref={ref_status}, "
 						f"brightness={brightness:.2f}, container={container_source}, yolo={yolo_reason}"
 				),
 		}
