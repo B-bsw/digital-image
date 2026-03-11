@@ -523,17 +523,30 @@ def detect_cat_food(image: Image.Image) -> dict:
 		ref_signature, ref_status = get_reference_kibble_signature()
 		ref_similarity = 0.0
 		if ref_signature is not None:
-				edge_scale = max(ref_signature["edge_mean"] * 0.8, 0.02)
-				lap_scale = max(ref_signature["lap_mean"] * 0.8, 0.03)
-				std_scale = max(ref_signature["std_mean"] * 0.8, 0.02)
+				edge_scale = max(ref_signature["edge_mean"] * 0.45, 0.012)
+				lap_scale = max(ref_signature["lap_mean"] * 0.45, 0.018)
+				std_scale = max(ref_signature["std_mean"] * 0.45, 0.012)
 
 				edge_like = np.abs(grad_mag - ref_signature["edge_mean"]) <= edge_scale
 				lap_like = np.abs(lap - ref_signature["lap_mean"]) <= lap_scale
 				std_like = np.abs(local_std - ref_signature["std_mean"]) <= std_scale
 				reference_kibble_like = edge_like & lap_like & std_like & (gray >= 0.10) & (gray <= 0.95)
-				kibble_like = base_kibble_like | reference_kibble_like
+				kibble_like = base_kibble_like & reference_kibble_like
 		else:
 				kibble_like = base_kibble_like
+
+		neighbor_count = (
+				kibble_like.astype(np.uint8)
+				+ np.roll(kibble_like.astype(np.uint8), 1, axis=0)
+				+ np.roll(kibble_like.astype(np.uint8), -1, axis=0)
+				+ np.roll(kibble_like.astype(np.uint8), 1, axis=1)
+				+ np.roll(kibble_like.astype(np.uint8), -1, axis=1)
+				+ np.roll(np.roll(kibble_like.astype(np.uint8), 1, axis=0), 1, axis=1)
+				+ np.roll(np.roll(kibble_like.astype(np.uint8), 1, axis=0), -1, axis=1)
+				+ np.roll(np.roll(kibble_like.astype(np.uint8), -1, axis=0), 1, axis=1)
+				+ np.roll(np.roll(kibble_like.astype(np.uint8), -1, axis=0), -1, axis=1)
+		)
+		kibble_like = kibble_like & (neighbor_count >= 4)
 
 		food_mask = kibble_like & container_mask
 		kibble_ratio = float(np.sum(food_mask) / max(container_pixels, 1))
@@ -548,14 +561,23 @@ def detect_cat_food(image: Image.Image) -> dict:
 				std_match = max(0.0, 1.0 - abs(texture_density - ref_signature["std_mean"]) / max(ref_signature["std_mean"], 1e-6))
 				ref_similarity = (edge_match + lap_match + std_match) / 3.0
 
+		strict_reject = False
+		if ref_signature is not None and ref_similarity < 0.35:
+				strict_reject = True
+		if kibble_ratio < 0.015:
+				strict_reject = True
+
 		raw_fill_ratio = kibble_ratio
-		fill_ratio = min(raw_fill_ratio / 0.24, 1.0)
+		fill_ratio = min(raw_fill_ratio / 0.20, 1.0)
 		score = (
-				0.45 * min(kibble_ratio / 0.16, 1.0)
-				+ 0.20 * min(edge_density / 0.09, 1.0)
-				+ 0.15 * min(texture_density / 0.07, 1.0)
+				0.60 * min(kibble_ratio / 0.14, 1.0)
+				+ 0.10 * min(edge_density / 0.09, 1.0)
+				+ 0.10 * min(texture_density / 0.07, 1.0)
 				+ 0.20 * ref_similarity
 		)
+		if strict_reject:
+			score = 0.0
+			fill_ratio = 0.0
 
 		confidence = int(max(0.0, min(score, 1.0)) * 100)
 		fill_percent = int(max(0.0, min(fill_ratio, 1.0)) * 100)
