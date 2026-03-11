@@ -23,7 +23,7 @@ HTML = """
 	<body class="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-violet-100 px-3 py-4 text-slate-700 sm:p-8" style="font-family: 'Mali', cursive;">
 		<div class="mx-auto w-full max-w-3xl rounded-2xl border border-rose-100 bg-white/90 p-4 shadow-xl shadow-rose-100/60 backdrop-blur sm:rounded-3xl sm:p-8">
 			<div class="mb-5 border-b border-rose-100 pb-4">
-				<h2 class="text-2xl font-bold text-rose-700 sm:text-3xl">เว็บตรวจจับอาหารแมว</h2>
+				<h2 class="text-2xl font-bold text-rose-700 sm:text-3xl">Meow Meow Food Detection</h2>
 				<p class="mt-2 text-sm text-slate-600 sm:text-base">เปิดกล้องเพื่อวิเคราะห์ภาพแบบเรียลไทม์ ระบบจะประเมินจากสีและพื้นผิวของภาพแต่ละเฟรม</p>
 			</div>
 
@@ -83,7 +83,7 @@ HTML = """
 			let stream = null;
 			let timerId = null;
 
-			function drawBox(ctx, canvasEl, box, label, color) {
+			function drawCircle(ctx, canvasEl, box, label, color) {
 				const dw = canvasEl.offsetWidth;
 				const dh = canvasEl.offsetHeight;
 				canvasEl.width = dw;
@@ -94,22 +94,28 @@ HTML = """
 				const y = box.y1 * dh;
 				const w = (box.x2 - box.x1) * dw;
 				const h = (box.y2 - box.y1) * dh;
+				const cx = x + w / 2;
+				const cy = y + h / 2;
+				const radius = Math.max(8, Math.min(w, h) / 2);
 				ctx.strokeStyle = color;
 				ctx.lineWidth = 3;
 				ctx.lineJoin = "round";
-				ctx.strokeRect(x, y, w, h);
+				ctx.beginPath();
+				ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+				ctx.stroke();
 				const fontSize = Math.max(12, Math.round(dh * 0.045));
 				ctx.font = `bold ${fontSize}px Mali, sans-serif`;
 				const textW = ctx.measureText(label).width;
 				const padX = 6, padY = 4;
 				const labelH = fontSize + padY * 2;
-				const labelY = y > labelH + 2 ? y - labelH : y + h + 2;
+				const labelY = (cy - radius) > labelH + 2 ? (cy - radius) - labelH : (cy + radius) + 2;
+				const labelX = Math.max(0, Math.min(dw - (textW + padX * 2), cx - (textW + padX * 2) / 2));
 				ctx.fillStyle = color;
 				ctx.beginPath();
-				ctx.roundRect(x, labelY, textW + padX * 2, labelH, 4);
+				ctx.roundRect(labelX, labelY, textW + padX * 2, labelH, 4);
 				ctx.fill();
 				ctx.fillStyle = "#fff";
-				ctx.fillText(label, x + padX, labelY + fontSize + padY - 2);
+				ctx.fillText(label, labelX + padX, labelY + fontSize + padY - 2);
 			}
 
 			const statusBaseClass = "text-sm font-semibold sm:text-base";
@@ -147,9 +153,9 @@ HTML = """
 				const boxColor = status === "empty" ? "#f43f5e" : status === "low" ? "#f59e0b" : "#10b981";
 				const boxLabel = box ? (status === "empty" ? "ถาดอาหาร (หมดแล้ว)" : `ถาดอาหาร ${pct}%`) : "";
 				if (isUpload) {
-					drawBox(previewCtx, previewOverlay, box, boxLabel, boxColor);
+					drawCircle(previewCtx, previewOverlay, box, boxLabel, boxColor);
 				} else {
-					drawBox(overlayCtx, overlay, box, boxLabel, boxColor);
+					drawCircle(overlayCtx, overlay, box, boxLabel, boxColor);
 				}
 
 				let statusKind, statusMsg;
@@ -221,7 +227,7 @@ HTML = """
 
 				try {
 					stream = await navigator.mediaDevices.getUserMedia({
-						video: { facingMode: "environment" },
+						video: { facingMode: "user" },
 						audio: false,
 					});
 					video.srcObject = stream;
