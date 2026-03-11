@@ -348,7 +348,7 @@ def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str, dict | None]:
 				return np.zeros((height, width), dtype=bool), load_error or "yolo unavailable", None
 
 		try:
-				result = model.predict(arr, imgsz=320, conf=0.25, verbose=False)[0]
+				result = model.predict(arr, imgsz=320, conf=0.30, verbose=False)[0]
 		except Exception as exc:
 				return np.zeros((height, width), dtype=bool), f"yolo inference failed: {exc}", None
 
@@ -359,30 +359,37 @@ def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str, dict | None]:
 		confidences = result.boxes.conf.detach().cpu().numpy()
 		xyxy = result.boxes.xyxy.detach().cpu().numpy()
 
-		priority_classes = [45, 41, 39]
-		selected_indices = np.array([], dtype=int)
-		for class_id in priority_classes:
-				indices = np.where(classes == class_id)[0]
-				if indices.size > 0:
-						selected_indices = indices
-						break
-
-		reason = "yolo container-like class found"
-		if selected_indices.size == 0:
-				img_area = float(height * width)
-				box_areas = (xyxy[:, 2] - xyxy[:, 0]) * (xyxy[:, 3] - xyxy[:, 1])
-				valid = np.where(
-						(confidences >= 0.35)
-						& (box_areas >= 0.02 * img_area)
-						& (box_areas <= 0.90 * img_area)
+		container_classes = {45, 41}
+		img_area = float(height * width)
+		box_areas = (xyxy[:, 2] - xyxy[:, 0]) * (xyxy[:, 3] - xyxy[:, 1])
+		primary_indices = np.where(
+				np.isin(classes, list(container_classes))
+				& (confidences >= 0.30)
+				& (box_areas >= 0.015 * img_area)
+				& (box_areas <= 0.65 * img_area)
+		)[0]
+		if primary_indices.size > 0:
+				selected_indices = primary_indices
+				reason = "yolo strict container class found"
+		else:
+				secondary_indices = np.where(
+						(classes == 39)
+						& (confidences >= 0.48)
+						& (box_areas >= 0.020 * img_area)
+						& (box_areas <= 0.45 * img_area)
 				)[0]
-				if valid.size == 0:
-						return np.zeros((height, width), dtype=bool), "yolo no suitable container box", None
-				selected_indices = valid
-				reason = "yolo fallback generic box"
+				if secondary_indices.size == 0:
+						return np.zeros((height, width), dtype=bool), "yolo strict container not found", None
+				selected_indices = secondary_indices
+				reason = "yolo strict fallback class found"
 
 		best_idx = selected_indices[np.argmax(confidences[selected_indices])]
 		x1, y1, x2, y2 = xyxy[best_idx]
+		raw_w = max(float(x2 - x1), 1.0)
+		raw_h = max(float(y2 - y1), 1.0)
+		raw_aspect = raw_w / raw_h
+		if raw_aspect < 0.30 or raw_aspect > 3.40:
+				return np.zeros((height, width), dtype=bool), "yolo strict container aspect reject", None
 		pad_x = int((x2 - x1) * 0.10)
 		pad_y = int((y2 - y1) * 0.10)
 		left = max(0, int(x1) - pad_x)
@@ -397,6 +404,8 @@ def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str, dict | None]:
 				"y1": top / height,
 				"x2": right / width,
 				"y2": bottom / height,
+				"confidence": float(confidences[best_idx]),
+				"class_id": int(classes[best_idx]),
 		}
 		return mask, reason, box_norm
 
@@ -483,10 +492,10 @@ def _extract_kibble_components(mask: np.ndarray) -> tuple[list[dict], np.ndarray
 						fill = area / max(box_w * box_h, 1)
 
 						is_kibble = (
-								area >= 5
-								and area <= 180
-								and aspect <= 2.8
-								and fill >= 0.22
+								area >= 4
+								and area <= 220
+								and aspect <= 3.0
+								and fill >= 0.18
 						)
 						if not is_kibble:
 								continue
@@ -500,6 +509,7 @@ def _extract_kibble_components(mask: np.ndarray) -> tuple[list[dict], np.ndarray
 										"y1": min_y / height,
 										"x2": (max_x + 1) / width,
 										"y2": (max_y + 1) / height,
+										"pixel_area": area,
 								}
 						)
 
@@ -544,12 +554,10 @@ def detect_cat_food(image: Image.Image) -> dict:
 		arr = np.array(image)
 
 		height, width = arr.shape[:2]
-		yy, xx = np.indices((height, width))
-		nx = (xx - (width / 2.0)) / (width / 2.0)
-		ny = (yy - (height / 2.0)) / (height / 2.0)
-		center_ellipse = (nx * nx + ny * ny) <= 0.92
 
 		gray = np.mean(arr.astype(np.float32), axis=2) / 255.0
+		hsv = rgb_to_hsv(arr)
+		saturation = hsv[..., 1]
 		dx = np.abs(np.diff(gray, axis=1))
 		dy = np.abs(np.diff(gray, axis=0))
 		texture = float((dx.mean() + dy.mean()) / 2.0)
@@ -561,29 +569,35 @@ def detect_cat_food(image: Image.Image) -> dict:
 		container_mask = yolo_mask
 		container_pixels = int(container_mask.sum())
 		if container_pixels == 0:
-				plate_like = gray >= np.percentile(gray, 35)
-				container_mask = center_ellipse & plate_like
-				container_pixels = int(container_mask.sum())
-				min_container_pixels = int(height * width * 0.08)
-				if container_pixels < min_container_pixels:
-						container_mask = center_ellipse
-						container_pixels = int(container_mask.sum())
-				container_source = "fallback-center"
-		else:
-				container_source = "yolo"
+				return {
+						"detected": False,
+						"status": "empty",
+						"confidence": 0,
+						"fill_percent": 0,
+						"bowl_box": None,
+						"reason": f"strict reject: no container, yolo={yolo_reason}, brightness={brightness:.2f}",
+				}
+		container_source = "yolo"
 
 		in_container_grad = grad_mag[container_mask]
 		in_container_lap = lap[container_mask]
 		in_container_std = local_std[container_mask]
+		in_container_sat = saturation[container_mask]
 
-		grad_threshold = float(np.percentile(in_container_grad, 70))
-		lap_threshold = float(np.percentile(in_container_lap, 72))
-		std_threshold = float(np.percentile(in_container_std, 68))
+		grad_threshold = float(np.percentile(in_container_grad, 65))
+		lap_threshold = float(np.percentile(in_container_lap, 67))
+		std_threshold = float(np.percentile(in_container_std, 63))
+		sat_threshold = float(np.percentile(in_container_sat, 55))
 
 		base_kibble_like = (
-				(grad_mag >= grad_threshold)
-				& (lap >= lap_threshold)
-				& (local_std >= std_threshold)
+				(grad_mag >= (grad_threshold * 0.94))
+				& (lap >= (lap_threshold * 0.94))
+				& (local_std >= (std_threshold * 0.92))
+				& (gray >= 0.10)
+				& (gray <= 0.95)
+		)
+		color_kibble_like = (
+				(saturation >= sat_threshold)
 				& (gray >= 0.10)
 				& (gray <= 0.95)
 		)
@@ -599,9 +613,11 @@ def detect_cat_food(image: Image.Image) -> dict:
 				lap_like = np.abs(lap - ref_signature["lap_mean"]) <= lap_scale
 				std_like = np.abs(local_std - ref_signature["std_mean"]) <= std_scale
 				reference_kibble_like = edge_like & lap_like & std_like & (gray >= 0.10) & (gray <= 0.95)
-				kibble_like = base_kibble_like & (reference_kibble_like | (local_std >= (std_threshold * 1.00)))
+				kibble_like = (base_kibble_like | color_kibble_like) & (
+						reference_kibble_like | (local_std >= (std_threshold * 0.96))
+				)
 		else:
-				kibble_like = base_kibble_like
+				kibble_like = base_kibble_like | color_kibble_like
 
 		neighbor_count = (
 				kibble_like.astype(np.uint8)
@@ -614,11 +630,16 @@ def detect_cat_food(image: Image.Image) -> dict:
 				+ np.roll(np.roll(kibble_like.astype(np.uint8), -1, axis=0), 1, axis=1)
 				+ np.roll(np.roll(kibble_like.astype(np.uint8), -1, axis=0), -1, axis=1)
 		)
-		kibble_like = kibble_like & (neighbor_count >= 3)
+		kibble_like = kibble_like & (neighbor_count >= 2)
 
 		raw_kibble_mask = kibble_like & container_mask
-		_, food_mask = _extract_kibble_components(raw_kibble_mask)
+		kibble_boxes, food_mask = _extract_kibble_components(raw_kibble_mask)
 		kibble_ratio = float(np.sum(food_mask) / max(container_pixels, 1))
+		kibble_count = len(kibble_boxes)
+		total_food_pixels = int(np.sum(food_mask))
+		largest_kibble_pixels = max((int(b["pixel_area"]) for b in kibble_boxes), default=0)
+		largest_kibble_share = float(largest_kibble_pixels / max(total_food_pixels, 1))
+		component_density = float(kibble_count / max(container_pixels / 1000.0, 1e-6))
 
 		edge_density = float(np.mean(in_container_grad))
 		lap_density = float(np.mean(in_container_lap))
@@ -631,13 +652,27 @@ def detect_cat_food(image: Image.Image) -> dict:
 				ref_similarity = (edge_match + lap_match + std_match) / 3.0
 
 		strict_reject = False
-		if ref_signature is not None and ref_similarity < 0.20 and kibble_ratio < 0.018:
+		if ref_signature is None:
 				strict_reject = True
-		if kibble_ratio < 0.0035:
+		if ref_signature is not None and ref_similarity < 0.16 and kibble_ratio < 0.014:
+				strict_reject = True
+		if ref_similarity < 0.48:
+				strict_reject = True
+		if kibble_ratio < 0.008:
+				strict_reject = True
+		if kibble_ratio < 0.0028:
+				strict_reject = True
+		if kibble_count < 2:
+				strict_reject = True
+		if kibble_count < 4 and kibble_ratio < 0.020:
+				strict_reject = True
+		if largest_kibble_share > 0.58 and kibble_ratio < 0.060:
+				strict_reject = True
+		if component_density < 0.055 and kibble_ratio < 0.028:
 				strict_reject = True
 
 		raw_fill_ratio = kibble_ratio
-		fill_ratio = min(raw_fill_ratio / 0.14, 1.0)
+		fill_ratio = min(raw_fill_ratio / 0.11, 1.0)
 		score = (
 				0.62 * min(kibble_ratio / 0.10, 1.0)
 				+ 0.10 * min(edge_density / 0.09, 1.0)
@@ -651,13 +686,13 @@ def detect_cat_food(image: Image.Image) -> dict:
 		confidence = int(max(0.0, min(score, 1.0)) * 100)
 		fill_percent = int(max(0.0, min(fill_ratio, 1.0)) * 100)
 
-		if fill_percent <= 4:
+		if fill_percent <= 3:
 				status = "empty"
 		elif fill_percent <= 20:
 				status = "low"
 		else:
 				status = "ok"
-		detected = fill_percent > 4
+		detected = (fill_percent > 3) and (confidence >= 35)
 
 		return {
 				"detected": detected,
@@ -667,6 +702,7 @@ def detect_cat_food(image: Image.Image) -> dict:
 				"bowl_box": bowl_box,
 				"reason": (
 						f"kibble_ratio={kibble_ratio:.2f}, "
+						f"kibble_count={kibble_count}, largest_share={largest_kibble_share:.2f}, comp_density={component_density:.3f}, "
 						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.3f}, "
 						f"edge={edge_density:.3f}, lap={lap_density:.3f}, local_std={texture_density:.3f}, "
 						f"ref_similarity={ref_similarity:.2f}, ref={ref_status}, "
