@@ -28,7 +28,14 @@ HTML = """
 			</div>
 
 			<div class="rounded-2xl border border-rose-100 bg-rose-50/60 p-2 sm:p-3">
-				<video id="camera" autoplay playsinline muted class="aspect-video w-full rounded-lg border border-rose-200 bg-slate-900 sm:rounded-xl"></video>
+				<div class="relative">
+					<video id="camera" autoplay playsinline muted class="aspect-video w-full rounded-lg border border-rose-200 bg-slate-900 sm:rounded-xl"></video>
+					<canvas id="overlay" class="pointer-events-none absolute inset-0 h-full w-full rounded-lg sm:rounded-xl"></canvas>
+				</div>
+				<div id="uploadPreview" class="relative mt-2 hidden">
+					<img id="previewImg" class="w-full rounded-lg sm:rounded-xl" alt="preview" />
+					<canvas id="previewOverlay" class="pointer-events-none absolute inset-0 h-full w-full rounded-lg sm:rounded-xl"></canvas>
+				</div>
 			</div>
 
 			<div class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -38,9 +45,17 @@ HTML = """
 				<button id="uploadBtn" type="button" class="w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-300">ทดสอบจากรูป</button>
 			</div>
 
-			<div class="mt-5 space-y-2 rounded-2xl border border-violet-100 bg-violet-50/60 p-4">
+			<div class="mt-5 space-y-3 rounded-2xl border border-violet-100 bg-violet-50/60 p-4">
 				<p id="resultText" class="text-sm font-semibold text-violet-700 sm:text-base">ผลลัพธ์: ยังไม่ได้เริ่ม</p>
-				<p id="fillText" class="text-sm text-slate-700">ความจุภาชนะที่ถูกเติม: -</p>
+				<div>
+					<div class="mb-1 flex items-center justify-between text-xs text-slate-500">
+						<span>ระดับอาหารที่เหลือในถ้วย</span>
+						<span id="fillPctLabel" class="font-semibold">-</span>
+					</div>
+					<div class="h-4 w-full overflow-hidden rounded-full bg-slate-200">
+						<div id="fillBar" class="h-4 rounded-full bg-emerald-400 transition-all duration-500" style="width: 0%"></div>
+					</div>
+				</div>
 				<p id="confidenceText" class="text-sm text-slate-700">ความมั่นใจ: -</p>
 				<p id="reasonText" class="break-words text-xs text-slate-500 sm:text-sm">-</p>
 			</div>
@@ -53,13 +68,49 @@ HTML = """
 			const uploadBtn = document.getElementById("uploadBtn");
 			const uploadInput = document.getElementById("uploadInput");
 			const resultText = document.getElementById("resultText");
-			const fillText = document.getElementById("fillText");
+			const fillPctLabel = document.getElementById("fillPctLabel");
+			const fillBar = document.getElementById("fillBar");
 			const confidenceText = document.getElementById("confidenceText");
 			const reasonText = document.getElementById("reasonText");
 
-			const canvas = document.createElement("canvas");
+			const overlay = document.getElementById("overlay");
+			const overlayCtx = overlay.getContext("2d");
+			const uploadPreview = document.getElementById("uploadPreview");
+			const previewImg = document.getElementById("previewImg");
+			const previewOverlay = document.getElementById("previewOverlay");
+			const previewCtx = previewOverlay.getContext("2d");
+			const captureCanvas = document.createElement("canvas");
 			let stream = null;
 			let timerId = null;
+
+			function drawBox(ctx, canvasEl, box, label, color) {
+				const dw = canvasEl.offsetWidth;
+				const dh = canvasEl.offsetHeight;
+				canvasEl.width = dw;
+				canvasEl.height = dh;
+				ctx.clearRect(0, 0, dw, dh);
+				if (!box) return;
+				const x = box.x1 * dw;
+				const y = box.y1 * dh;
+				const w = (box.x2 - box.x1) * dw;
+				const h = (box.y2 - box.y1) * dh;
+				ctx.strokeStyle = color;
+				ctx.lineWidth = 3;
+				ctx.lineJoin = "round";
+				ctx.strokeRect(x, y, w, h);
+				const fontSize = Math.max(12, Math.round(dh * 0.045));
+				ctx.font = `bold ${fontSize}px Mali, sans-serif`;
+				const textW = ctx.measureText(label).width;
+				const padX = 6, padY = 4;
+				const labelH = fontSize + padY * 2;
+				const labelY = y > labelH + 2 ? y - labelH : y + h + 2;
+				ctx.fillStyle = color;
+				ctx.beginPath();
+				ctx.roundRect(x, labelY, textW + padX * 2, labelH, 4);
+				ctx.fill();
+				ctx.fillStyle = "#fff";
+				ctx.fillText(label, x + padX, labelY + fontSize + padY - 2);
+			}
 
 			const statusBaseClass = "text-sm font-semibold sm:text-base";
 			const statusOkClass = "text-emerald-600";
@@ -89,14 +140,46 @@ HTML = """
 				stopBtn.className = isRunning ? stopBtnEnabledClass : stopBtnDisabledClass;
 			}
 
-			function renderResult(result) {
-				setStatus(result.detected ? "ok" : "no", `ผลลัพธ์: ${result.detected ? "พบอาหารแมว" : "ไม่พบอาหารแมว"}`);
-				fillText.textContent = `ความจุภาชนะที่ถูกเติม: ${result.fill_percent}%`;
+			function renderResult(result, isUpload) {
+				const pct = result.fill_percent ?? 0;
+				const status = result.status ?? (result.detected ? "ok" : "empty");
+				const box = result.bowl_box ?? null;
+				const boxColor = status === "empty" ? "#f43f5e" : status === "low" ? "#f59e0b" : "#10b981";
+				const boxLabel = box ? (status === "empty" ? "ถาดอาหาร (หมดแล้ว)" : `ถาดอาหาร ${pct}%`) : "";
+				if (isUpload) {
+					drawBox(previewCtx, previewOverlay, box, boxLabel, boxColor);
+				} else {
+					drawBox(overlayCtx, overlay, box, boxLabel, boxColor);
+				}
+
+				let statusKind, statusMsg;
+				if (status === "empty") {
+					statusKind = "no";
+					statusMsg = "อาหารหมดแล้ว! กรุณาเติมอาหารให้น้องแมว";
+				} else if (status === "low") {
+					statusKind = "idle";
+					statusMsg = `อาหารเกือบหมด เหลือประมาณ ${pct}%`;
+				} else {
+					statusKind = "ok";
+					statusMsg = `มีอาหารเหลืออยู่ ${pct}%`;
+				}
+				setStatus(statusKind, `ผลลัพธ์: ${statusMsg}`);
+
+				fillPctLabel.textContent = `${pct}%`;
+				fillBar.style.width = `${pct}%`;
+				if (status === "empty") {
+					fillBar.className = "h-4 rounded-full bg-rose-400 transition-all duration-500";
+				} else if (status === "low") {
+					fillBar.className = "h-4 rounded-full bg-amber-400 transition-all duration-500";
+				} else {
+					fillBar.className = "h-4 rounded-full bg-emerald-400 transition-all duration-500";
+				}
+
 				confidenceText.textContent = `ความมั่นใจ: ${result.confidence}%`;
 				reasonText.textContent = result.reason;
 			}
 
-			async function analyzeImageData(imageData) {
+			async function analyzeImageData(imageData, isUpload = false) {
 				try {
 					const response = await fetch("/analyze_frame", {
 						method: "POST",
@@ -109,10 +192,9 @@ HTML = """
 					}
 
 					const result = await response.json();
-					renderResult(result);
+					renderResult(result, isUpload);
 				} catch (_) {
 					setStatus("no", "ผลลัพธ์: วิเคราะห์ไม่สำเร็จ");
-					fillText.textContent = "ความจุภาชนะที่ถูกเติม: -";
 					confidenceText.textContent = "ความมั่นใจ: -";
 					reasonText.textContent = "โปรดลองใหม่อีกครั้ง";
 				}
@@ -123,13 +205,13 @@ HTML = """
 					return;
 				}
 
-				canvas.width = video.videoWidth;
-				canvas.height = video.videoHeight;
-				const ctx = canvas.getContext("2d");
-				ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+				captureCanvas.width = video.videoWidth;
+				captureCanvas.height = video.videoHeight;
+				const ctx = captureCanvas.getContext("2d");
+				ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
 
-				const imageData = canvas.toDataURL("image/jpeg", 0.7);
-				await analyzeImageData(imageData);
+				const imageData = captureCanvas.toDataURL("image/jpeg", 0.7);
+				await analyzeImageData(imageData, false);
 			}
 
 			startBtn.addEventListener("click", async () => {
@@ -163,9 +245,14 @@ HTML = """
 					stream = null;
 					video.srcObject = null;
 				}
+				overlay.width = overlay.offsetWidth;
+				overlay.height = overlay.offsetHeight;
+				overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
 				setButtonsRunning(false);
 				setStatus("idle", "ผลลัพธ์: หยุดการตรวจจับ");
-				fillText.textContent = "ความจุภาชนะที่ถูกเติม: -";
+				fillPctLabel.textContent = "-";
+				fillBar.style.width = "0%";
+				fillBar.className = "h-4 rounded-full bg-emerald-400 transition-all duration-500";
 				confidenceText.textContent = "ความมั่นใจ: -";
 				reasonText.textContent = "-";
 			});
@@ -188,8 +275,10 @@ HTML = """
 						reasonText.textContent = "กรุณาลองเลือกรูปใหม่";
 						return;
 					}
+					previewImg.src = dataUrl;
+					uploadPreview.classList.remove("hidden");
 					setStatus("idle", "ผลลัพธ์: กำลังวิเคราะห์จากรูป");
-					await analyzeImageData(dataUrl);
+					await analyzeImageData(dataUrl, true);
 				};
 				reader.onerror = () => {
 					setStatus("no", "ผลลัพธ์: อ่านรูปไม่สำเร็จ");
@@ -244,19 +333,19 @@ def get_yolo_model():
 				return None, f"yolo model load failed: {exc}"
 
 
-def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str]:
+def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str, dict | None]:
 		height, width = arr.shape[:2]
 		model, load_error = get_yolo_model()
 		if model is None:
-				return np.zeros((height, width), dtype=bool), load_error or "yolo unavailable"
+				return np.zeros((height, width), dtype=bool), load_error or "yolo unavailable", None
 
 		try:
 				result = model.predict(arr, imgsz=320, conf=0.25, verbose=False)[0]
 		except Exception as exc:
-				return np.zeros((height, width), dtype=bool), f"yolo inference failed: {exc}"
+				return np.zeros((height, width), dtype=bool), f"yolo inference failed: {exc}", None
 
 		if result.boxes is None or len(result.boxes) == 0:
-				return np.zeros((height, width), dtype=bool), "yolo bowl not found"
+				return np.zeros((height, width), dtype=bool), "yolo bowl not found", None
 
 		classes = result.boxes.cls.detach().cpu().numpy().astype(int)
 		confidences = result.boxes.conf.detach().cpu().numpy()
@@ -280,7 +369,7 @@ def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str]:
 						& (box_areas <= 0.90 * img_area)
 				)[0]
 				if valid.size == 0:
-						return np.zeros((height, width), dtype=bool), "yolo no suitable container box"
+						return np.zeros((height, width), dtype=bool), "yolo no suitable container box", None
 				selected_indices = valid
 				reason = "yolo fallback generic box"
 
@@ -295,7 +384,13 @@ def detect_bowl_mask(arr: np.ndarray) -> tuple[np.ndarray, str]:
 
 		mask = np.zeros((height, width), dtype=bool)
 		mask[top:bottom, left:right] = True
-		return mask, reason
+		box_norm = {
+				"x1": left / width,
+				"y1": top / height,
+				"x2": right / width,
+				"y2": bottom / height,
+		}
+		return mask, reason, box_norm
 
 
 def detect_cat_food(image: Image.Image) -> dict:
@@ -322,7 +417,7 @@ def detect_cat_food(image: Image.Image) -> dict:
 
 		brightness = float(v.mean())
 
-		yolo_mask, yolo_reason = detect_bowl_mask(arr)
+		yolo_mask, yolo_reason, bowl_box = detect_bowl_mask(arr)
 		container_mask = yolo_mask
 		container_pixels = int(container_mask.sum())
 		if container_pixels == 0:
@@ -351,12 +446,21 @@ def detect_cat_food(image: Image.Image) -> dict:
 
 		confidence = int(max(0.0, min(score, 1.0)) * 100)
 		fill_percent = int(max(0.0, min(fill_ratio, 1.0)) * 100)
-		detected = fill_percent >= 1
+
+		if fill_percent <= 5:
+				status = "empty"
+		elif fill_percent <= 25:
+				status = "low"
+		else:
+				status = "ok"
+		detected = fill_percent > 5
 
 		return {
 				"detected": detected,
+				"status": status,
 				"confidence": confidence,
 				"fill_percent": fill_percent,
+				"bowl_box": bowl_box,
 				"reason": (
 						f"food_ratio={food_ratio:.2f}, "
 						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.2f}, "
