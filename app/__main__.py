@@ -14,29 +14,32 @@ HTML = """
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>Cat Food Detector</title>
-		<style>
-			body { font-family: Arial, sans-serif; margin: 32px; max-width: 760px; }
-			.card { border: 1px solid #ddd; border-radius: 10px; padding: 20px; }
-			.ok { color: #0a7d1f; font-weight: 700; }
-			.no { color: #b00020; font-weight: 700; }
-			video { width: 100%; max-width: 640px; border-radius: 8px; border: 1px solid #ddd; background: #111; }
-			button { margin-right: 8px; }
-			small { color: #666; }
-		</style>
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+		<link href="https://fonts.googleapis.com/css2?family=Mali:wght@400;500;600;700&display=swap" rel="stylesheet">
+		<script src="https://cdn.tailwindcss.com"></script>
 	</head>
-	<body>
-		<div class="card">
-			<h2>เว็บตรวจจับอาหารแมว</h2>
-			<p>เปิดกล้องเพื่อวิเคราะห์ภาพแบบ realtime ระบบจะประเมินจากสีและพื้นผิวของภาพแต่ละเฟรม</p>
-			<video id="camera" autoplay playsinline muted></video>
-			<div style="margin-top: 10px;">
-				<button id="startBtn" type="button">เริ่มกล้อง</button>
-				<button id="stopBtn" type="button" disabled>หยุด</button>
+	<body class="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-violet-100 p-5 sm:p-8 text-slate-700" style="font-family: 'Mali', cursive;">
+		<div class="mx-auto w-full max-w-3xl rounded-3xl border border-rose-100 bg-white/90 p-5 shadow-xl shadow-rose-100/60 backdrop-blur sm:p-8">
+			<div class="mb-5 border-b border-rose-100 pb-4">
+				<h2 class="text-2xl font-bold text-rose-700 sm:text-3xl">เว็บตรวจจับอาหารแมว</h2>
+				<p class="mt-2 text-sm text-slate-600 sm:text-base">เปิดกล้องเพื่อวิเคราะห์ภาพแบบเรียลไทม์ ระบบจะประเมินจากสีและพื้นผิวของภาพแต่ละเฟรม</p>
 			</div>
-			<hr />
-			<p id="resultText">ผลลัพธ์: ยังไม่ได้เริ่ม</p>
-			<p id="confidenceText">ความมั่นใจ: -</p>
-			<p><small id="reasonText">-</small></p>
+
+			<div class="rounded-2xl border border-rose-100 bg-rose-50/60 p-3">
+				<video id="camera" autoplay playsinline muted class="aspect-video w-full rounded-xl border border-rose-200 bg-slate-900"></video>
+			</div>
+
+			<div class="mt-4 flex flex-wrap gap-2">
+				<button id="startBtn" type="button" class="rounded-xl bg-rose-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-600 focus:outline-none focus:ring-2 focus:ring-rose-300">เริ่มกล้อง</button>
+				<button id="stopBtn" type="button" disabled class="rounded-xl bg-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 transition disabled:cursor-not-allowed">หยุด</button>
+			</div>
+
+			<div class="mt-5 space-y-2 rounded-2xl border border-violet-100 bg-violet-50/60 p-4">
+				<p id="resultText" class="text-sm font-semibold text-violet-700 sm:text-base">ผลลัพธ์: ยังไม่ได้เริ่ม</p>
+				<p id="confidenceText" class="text-sm text-slate-700">ความมั่นใจ: -</p>
+				<p id="reasonText" class="text-xs text-slate-500 sm:text-sm">-</p>
+			</div>
 		</div>
 
 		<script>
@@ -50,6 +53,34 @@ HTML = """
 			const canvas = document.createElement("canvas");
 			let stream = null;
 			let timerId = null;
+
+			const statusBaseClass = "text-sm font-semibold sm:text-base";
+			const statusOkClass = "text-emerald-600";
+			const statusNoClass = "text-rose-600";
+			const statusIdleClass = "text-violet-700";
+
+			function setStatus(kind, message) {
+				resultText.className = statusBaseClass;
+				if (kind === "ok") {
+					resultText.classList.add(statusOkClass);
+				} else if (kind === "no") {
+					resultText.classList.add(statusNoClass);
+				} else {
+					resultText.classList.add(statusIdleClass);
+				}
+				resultText.textContent = message;
+			}
+
+			function setButtonsRunning(isRunning) {
+				startBtn.disabled = isRunning;
+				stopBtn.disabled = !isRunning;
+				startBtn.className = isRunning
+					? "rounded-xl bg-rose-300 px-4 py-2 text-sm font-semibold text-white transition disabled:cursor-not-allowed"
+					: "rounded-xl bg-rose-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-600 focus:outline-none focus:ring-2 focus:ring-rose-300";
+				stopBtn.className = isRunning
+					? "rounded-xl bg-violet-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600"
+					: "rounded-xl bg-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 transition disabled:cursor-not-allowed";
+			}
 
 			async function analyzeFrame() {
 				if (!stream || video.videoWidth === 0 || video.videoHeight === 0) {
@@ -75,13 +106,11 @@ HTML = """
 					}
 
 					const result = await response.json();
-					resultText.className = result.detected ? "ok" : "no";
-					resultText.textContent = `ผลลัพธ์: ${result.detected ? "พบอาหารแมว" : "ไม่พบอาหารแมว"}`;
+					setStatus(result.detected ? "ok" : "no", `ผลลัพธ์: ${result.detected ? "พบอาหารแมว" : "ไม่พบอาหารแมว"}`);
 					confidenceText.textContent = `ความมั่นใจ: ${result.confidence}%`;
 					reasonText.textContent = result.reason;
 				} catch (_) {
-					resultText.className = "no";
-					resultText.textContent = "ผลลัพธ์: วิเคราะห์ไม่สำเร็จ";
+					setStatus("no", "ผลลัพธ์: วิเคราะห์ไม่สำเร็จ");
 					confidenceText.textContent = "ความมั่นใจ: -";
 					reasonText.textContent = "โปรดลองใหม่อีกครั้ง";
 				}
@@ -98,14 +127,12 @@ HTML = """
 						audio: false,
 					});
 					video.srcObject = stream;
-					startBtn.disabled = true;
-					stopBtn.disabled = false;
+					setButtonsRunning(true);
 
 					timerId = window.setInterval(analyzeFrame, 500);
 					analyzeFrame();
 				} catch (_) {
-					resultText.className = "no";
-					resultText.textContent = "ผลลัพธ์: ไม่สามารถเปิดกล้องได้";
+					setStatus("no", "ผลลัพธ์: ไม่สามารถเปิดกล้องได้");
 					reasonText.textContent = "กรุณาอนุญาตการใช้งานกล้องในเบราว์เซอร์";
 				}
 			});
@@ -120,10 +147,8 @@ HTML = """
 					stream = null;
 					video.srcObject = null;
 				}
-				startBtn.disabled = false;
-				stopBtn.disabled = true;
-				resultText.className = "";
-				resultText.textContent = "ผลลัพธ์: หยุดการตรวจจับ";
+				setButtonsRunning(false);
+				setStatus("idle", "ผลลัพธ์: หยุดการตรวจจับ");
 				confidenceText.textContent = "ความมั่นใจ: -";
 				reasonText.textContent = "-";
 			});
