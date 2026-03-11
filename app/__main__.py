@@ -24,7 +24,7 @@ HTML = """
 		<div class="mx-auto w-full max-w-3xl rounded-2xl border border-rose-100 bg-white/90 p-4 shadow-xl shadow-rose-100/60 backdrop-blur sm:rounded-3xl sm:p-8">
 			<div class="mb-5 border-b border-rose-100 pb-4">
 				<h2 class="text-2xl font-bold text-rose-700 sm:text-3xl">Meow Meow Food Detection</h2>
-				<p class="mt-2 text-sm text-slate-600 sm:text-base">เปิดกล้องเพื่อวิเคราะห์ภาพแบบเรียลไทม์ ระบบจะประเมินจากสีและพื้นผิวของภาพแต่ละเฟรม</p>
+				<p class="mt-2 text-sm text-slate-600 sm:text-base">เปิดกล้องเพื่อวิเคราะห์ภาพแบบเรียลไทม์ ระบบจะประเมินจากลักษณะเม็ดอาหารและพื้นผิวของภาพแต่ละเฟรม</p>
 			</div>
 
 			<div class="rounded-2xl border border-rose-100 bg-rose-50/60 p-2 sm:p-3">
@@ -227,7 +227,7 @@ HTML = """
 
 				try {
 					stream = await navigator.mediaDevices.getUserMedia({
-						video: { facingMode: "user" },
+						video: { facingMode: "environment" },
 						audio: false,
 					});
 					video.srcObject = stream;
@@ -403,31 +403,58 @@ def detect_cat_food(image: Image.Image) -> dict:
 		image = image.convert("RGB").resize((320, 320))
 		arr = np.array(image)
 
-		hsv = rgb_to_hsv(arr)
-		h = hsv[..., 0] * 360.0
-		s = hsv[..., 1]
-		v = hsv[..., 2]
-
-		height, width = h.shape
+		height, width = arr.shape[:2]
 		yy, xx = np.indices((height, width))
 		nx = (xx - (width / 2.0)) / (width / 2.0)
 		ny = (yy - (height / 2.0)) / (height / 2.0)
 		center_ellipse = (nx * nx + ny * ny) <= 0.92
 
-		gray = np.mean(arr.astype(np.float32), axis=2)
+		gray = np.mean(arr.astype(np.float32), axis=2) / 255.0
 		dx = np.abs(np.diff(gray, axis=1))
 		dy = np.abs(np.diff(gray, axis=0))
 		texture = float((dx.mean() + dy.mean()) / 2.0)
 		gx, gy = np.gradient(gray)
 		grad_mag = np.hypot(gx, gy)
+		lap = np.abs(
+				(4.0 * gray)
+				- np.roll(gray, 1, axis=0)
+				- np.roll(gray, -1, axis=0)
+				- np.roll(gray, 1, axis=1)
+				- np.roll(gray, -1, axis=1)
+		)
 
-		brightness = float(v.mean())
+		gray_sq = gray * gray
+		local_mean = (
+				gray
+				+ np.roll(gray, 1, axis=0)
+				+ np.roll(gray, -1, axis=0)
+				+ np.roll(gray, 1, axis=1)
+				+ np.roll(gray, -1, axis=1)
+				+ np.roll(np.roll(gray, 1, axis=0), 1, axis=1)
+				+ np.roll(np.roll(gray, 1, axis=0), -1, axis=1)
+				+ np.roll(np.roll(gray, -1, axis=0), 1, axis=1)
+				+ np.roll(np.roll(gray, -1, axis=0), -1, axis=1)
+		) / 9.0
+		local_sq_mean = (
+				gray_sq
+				+ np.roll(gray_sq, 1, axis=0)
+				+ np.roll(gray_sq, -1, axis=0)
+				+ np.roll(gray_sq, 1, axis=1)
+				+ np.roll(gray_sq, -1, axis=1)
+				+ np.roll(np.roll(gray_sq, 1, axis=0), 1, axis=1)
+				+ np.roll(np.roll(gray_sq, 1, axis=0), -1, axis=1)
+				+ np.roll(np.roll(gray_sq, -1, axis=0), 1, axis=1)
+				+ np.roll(np.roll(gray_sq, -1, axis=0), -1, axis=1)
+		) / 9.0
+		local_std = np.sqrt(np.maximum(local_sq_mean - (local_mean * local_mean), 0.0))
+
+		brightness = float(gray.mean())
 
 		yolo_mask, yolo_reason, bowl_box = detect_bowl_mask(arr)
 		container_mask = yolo_mask
 		container_pixels = int(container_mask.sum())
 		if container_pixels == 0:
-				plate_like = (s <= 0.55) & (v >= np.percentile(v, 35))
+				plate_like = gray >= np.percentile(gray, 35)
 				container_mask = center_ellipse & plate_like
 				container_pixels = int(container_mask.sum())
 				min_container_pixels = int(height * width * 0.08)
@@ -438,17 +465,34 @@ def detect_cat_food(image: Image.Image) -> dict:
 		else:
 				container_source = "yolo"
 
-		grad_threshold = float(np.percentile(grad_mag[container_mask], 72))
-		texture_mask = grad_mag >= grad_threshold
-		food_warm = (h >= 8) & (h <= 75) & (s >= 0.08) & (v >= 0.08) & (v <= 0.95)
-		food_dark = (v >= 0.10) & (v <= 0.78) & (s >= 0.04)
-		texture_food = texture_mask & (v >= 0.07)
-		food_mask = (food_warm | food_dark | texture_food) & container_mask
-		food_ratio = float(np.sum(food_mask) / max(container_pixels, 1))
+		in_container_grad = grad_mag[container_mask]
+		in_container_lap = lap[container_mask]
+		in_container_std = local_std[container_mask]
 
-		raw_fill_ratio = float(np.sum(food_mask & container_mask) / max(container_pixels, 1))
-		fill_ratio = min(raw_fill_ratio / 0.60, 1.0)
-		score = 0.60 * min(food_ratio / 0.06, 1.0) + 0.40 * min(raw_fill_ratio / 0.12, 1.0)
+		grad_threshold = float(np.percentile(in_container_grad, 70))
+		lap_threshold = float(np.percentile(in_container_lap, 72))
+		std_threshold = float(np.percentile(in_container_std, 68))
+
+		kibble_like = (
+				(grad_mag >= grad_threshold)
+				& (lap >= lap_threshold)
+				& (local_std >= std_threshold)
+				& (gray >= 0.10)
+				& (gray <= 0.95)
+		)
+		food_mask = kibble_like & container_mask
+		kibble_ratio = float(np.sum(food_mask) / max(container_pixels, 1))
+
+		edge_density = float(np.mean(in_container_grad))
+		texture_density = float(np.mean(in_container_std))
+
+		raw_fill_ratio = kibble_ratio
+		fill_ratio = min(raw_fill_ratio / 0.22, 1.0)
+		score = (
+				0.55 * min(kibble_ratio / 0.16, 1.0)
+				+ 0.25 * min(edge_density / 0.09, 1.0)
+				+ 0.20 * min(texture_density / 0.07, 1.0)
+		)
 
 		confidence = int(max(0.0, min(score, 1.0)) * 100)
 		fill_percent = int(max(0.0, min(fill_ratio, 1.0)) * 100)
@@ -468,8 +512,9 @@ def detect_cat_food(image: Image.Image) -> dict:
 				"fill_percent": fill_percent,
 				"bowl_box": bowl_box,
 				"reason": (
-						f"food_ratio={food_ratio:.2f}, "
-						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.2f}, "
+						f"kibble_ratio={kibble_ratio:.2f}, "
+						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.3f}, "
+						f"edge={edge_density:.3f}, local_std={texture_density:.3f}, "
 						f"brightness={brightness:.2f}, container={container_source}, yolo={yolo_reason}"
 				),
 		}
