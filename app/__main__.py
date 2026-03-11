@@ -84,31 +84,29 @@ HTML = """
 			let stream = null;
 			let timerId = null;
 
-			function drawKibbleCircles(ctx, canvasEl, boxes, color) {
+			function drawFoodMarker(ctx, canvasEl, box, detected, color) {
 				const dw = canvasEl.offsetWidth;
 				const dh = canvasEl.offsetHeight;
 				canvasEl.width = dw;
 				canvasEl.height = dh;
 				ctx.clearRect(0, 0, dw, dh);
-				if (!boxes || boxes.length === 0) return;
+				if (!box) return;
+				const x = box.x1 * dw;
+				const y = box.y1 * dh;
+				const w = (box.x2 - box.x1) * dw;
+				const h = (box.y2 - box.y1) * dh;
+				const cx = x + w / 2;
+				const cy = y + h / 2;
+				const radius = Math.max(8, Math.min(w, h) / 2);
 				ctx.strokeStyle = color;
-				ctx.lineWidth = 2;
+				ctx.lineWidth = 3;
 				ctx.lineJoin = "round";
-				for (const box of boxes) {
-					const x = box.x1 * dw;
-					const y = box.y1 * dh;
-					const w = (box.x2 - box.x1) * dw;
-					const h = (box.y2 - box.y1) * dh;
-					const cx = x + w / 2;
-					const cy = y + h / 2;
-					const radius = Math.max(2, Math.min(w, h) / 2);
-					ctx.beginPath();
-					ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-					ctx.stroke();
-				}
+				ctx.beginPath();
+				ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+				ctx.stroke();
 
 				const fontSize = Math.max(12, Math.round(dh * 0.045));
-				const label = `เม็ดอาหาร ${boxes.length} เม็ด`;
+				const label = detected ? "พบอาหารแมว" : "ไม่พบอาหารแมว";
 				ctx.font = `bold ${fontSize}px Mali, sans-serif`;
 				const textW = ctx.measureText(label).width;
 				const padX = 6, padY = 4;
@@ -154,12 +152,12 @@ HTML = """
 			function renderResult(result, isUpload) {
 				const pct = result.fill_percent ?? 0;
 				const status = result.status ?? (result.detected ? "ok" : "empty");
-				const kibbleBoxes = result.kibble_boxes ?? [];
+				const bowlBox = result.bowl_box ?? null;
 				const boxColor = status === "empty" ? "#f43f5e" : status === "low" ? "#f59e0b" : "#10b981";
 				if (isUpload) {
-					drawKibbleCircles(previewCtx, previewOverlay, kibbleBoxes, boxColor);
+					drawFoodMarker(previewCtx, previewOverlay, bowlBox, Boolean(result.detected), boxColor);
 				} else {
-					drawKibbleCircles(overlayCtx, overlay, kibbleBoxes, boxColor);
+					drawFoodMarker(overlayCtx, overlay, bowlBox, Boolean(result.detected), boxColor);
 				}
 
 				let statusKind, statusMsg;
@@ -593,15 +591,15 @@ def detect_cat_food(image: Image.Image) -> dict:
 		ref_signature, ref_status = get_reference_kibble_signature()
 		ref_similarity = 0.0
 		if ref_signature is not None:
-				edge_scale = max(ref_signature["edge_mean"] * 0.65, 0.016)
-				lap_scale = max(ref_signature["lap_mean"] * 0.65, 0.024)
-				std_scale = max(ref_signature["std_mean"] * 0.65, 0.016)
+				edge_scale = max(ref_signature["edge_mean"] * 0.78, 0.018)
+				lap_scale = max(ref_signature["lap_mean"] * 0.78, 0.028)
+				std_scale = max(ref_signature["std_mean"] * 0.78, 0.018)
 
 				edge_like = np.abs(grad_mag - ref_signature["edge_mean"]) <= edge_scale
 				lap_like = np.abs(lap - ref_signature["lap_mean"]) <= lap_scale
 				std_like = np.abs(local_std - ref_signature["std_mean"]) <= std_scale
 				reference_kibble_like = edge_like & lap_like & std_like & (gray >= 0.10) & (gray <= 0.95)
-				kibble_like = base_kibble_like & (reference_kibble_like | (local_std >= (std_threshold * 1.08)))
+				kibble_like = base_kibble_like & (reference_kibble_like | (local_std >= (std_threshold * 1.00)))
 		else:
 				kibble_like = base_kibble_like
 
@@ -619,9 +617,8 @@ def detect_cat_food(image: Image.Image) -> dict:
 		kibble_like = kibble_like & (neighbor_count >= 3)
 
 		raw_kibble_mask = kibble_like & container_mask
-		kibble_boxes, food_mask = _extract_kibble_components(raw_kibble_mask)
+		_, food_mask = _extract_kibble_components(raw_kibble_mask)
 		kibble_ratio = float(np.sum(food_mask) / max(container_pixels, 1))
-		kibble_count = len(kibble_boxes)
 
 		edge_density = float(np.mean(in_container_grad))
 		lap_density = float(np.mean(in_container_lap))
@@ -634,17 +631,15 @@ def detect_cat_food(image: Image.Image) -> dict:
 				ref_similarity = (edge_match + lap_match + std_match) / 3.0
 
 		strict_reject = False
-		if ref_signature is not None and ref_similarity < 0.28 and kibble_ratio < 0.03:
+		if ref_signature is not None and ref_similarity < 0.20 and kibble_ratio < 0.018:
 				strict_reject = True
-		if kibble_ratio < 0.006:
-				strict_reject = True
-		if kibble_count == 0:
+		if kibble_ratio < 0.0035:
 				strict_reject = True
 
 		raw_fill_ratio = kibble_ratio
-		fill_ratio = min(raw_fill_ratio / 0.17, 1.0)
+		fill_ratio = min(raw_fill_ratio / 0.14, 1.0)
 		score = (
-				0.62 * min(kibble_ratio / 0.12, 1.0)
+				0.62 * min(kibble_ratio / 0.10, 1.0)
 				+ 0.10 * min(edge_density / 0.09, 1.0)
 				+ 0.10 * min(texture_density / 0.07, 1.0)
 				+ 0.18 * ref_similarity
@@ -656,23 +651,22 @@ def detect_cat_food(image: Image.Image) -> dict:
 		confidence = int(max(0.0, min(score, 1.0)) * 100)
 		fill_percent = int(max(0.0, min(fill_ratio, 1.0)) * 100)
 
-		if fill_percent <= 5:
+		if fill_percent <= 4:
 				status = "empty"
-		elif fill_percent <= 25:
+		elif fill_percent <= 20:
 				status = "low"
 		else:
 				status = "ok"
-		detected = fill_percent > 5
+		detected = fill_percent > 4
 
 		return {
 				"detected": detected,
 				"status": status,
 				"confidence": confidence,
 				"fill_percent": fill_percent,
-				"kibble_boxes": kibble_boxes,
 				"bowl_box": bowl_box,
 				"reason": (
-						f"kibble_ratio={kibble_ratio:.2f}, count={kibble_count}, "
+						f"kibble_ratio={kibble_ratio:.2f}, "
 						f"fill_raw={raw_fill_ratio:.2f}, texture={texture:.3f}, "
 						f"edge={edge_density:.3f}, lap={lap_density:.3f}, local_std={texture_density:.3f}, "
 						f"ref_similarity={ref_similarity:.2f}, ref={ref_status}, "
