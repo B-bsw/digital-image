@@ -27,7 +27,7 @@ python3 -m app
 # follow port 300 on website
 http://localhost:3000
 #or
-http://127.0.0.1:3000
+http://0.0.0.0:3000
 ```
 
 # Team
