@@ -1,3 +1,9 @@
 /**/__pycache__
 .vercel
+
 .env*.local
+yolov8n.pt
+/runs
+
+# mics file
+.DS_Store
