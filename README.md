@@ -19,15 +19,16 @@ pip3 install -r requirements.txt
 
 # run app
 python3 -m app
+
+# start app on deployment
+gunicorn app.__main__:app --bind 0.0.0.0:3000
 ```
 
 > หมายเหตุ: ครั้งแรกที่รัน YOLO อาจดาวน์โหลดโมเดล yolov8n.pt อัตโนมัติ
 
 ```bash
-# follow port 300 on website
+# follow port 3000 on website
 http://localhost:3000
-#or
-http://0.0.0.0:3000
 ```
 
 # Team
